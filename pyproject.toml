@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "l4d2-index-buffer-fixer"
+version = "0.1.0"
+description = "Find and defuse Left 4 Dead 2 add-on models that overflow the engine's dynamic index buffer ('Too many indices for index buffer' crash)."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: OS Independent",
+  "Topic :: Games/Entertainment",
+]
+
+[project.scripts]
+ibfix = "l4d2_ibfix.cli:main"
+ibfix-gui = "l4d2_ibfix.gui:main"
+
+[tool.setuptools]
+packages = ["l4d2_ibfix"]
