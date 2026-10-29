@@ -10,6 +10,7 @@ Command-line interface.
     ibfix probe
     ibfix bisect    start|good|bad|status|finish
     ibfix inspect   PATH.vpk            (analyse one VPK anywhere on disk)
+    ibfix locate                        (show every place searched for the game, and the verdict)
 
 Global options: --game-dir PATH, --data-dir PATH, --json
 """
@@ -28,14 +29,38 @@ from .analyzer import Analyzer, DEFAULT_CATEGORIES, DECAL_CATEGORIES, LEVEL_ORDE
 from .bisect import Bisector
 from .diagnostics import diagnose, format_diagnosis, write_probe_cfg
 from .fixer import Fixer, MODES
-from .gamefiles import GameInstall, default_data_dir, find_game_dir
+from .gamefiles import GameInstall, default_data_dir, find_game_dir, find_installs, format_candidates
+
+
+GAME_DIR_EXAMPLE = '--game-dir "D:\\SteamLibrary\\steamapps\\common\\Left 4 Dead 2"'
 
 
 def _game(args) -> GameInstall:
-    root = find_game_dir(args.game_dir)
-    if root is None:
-        sys.exit("Could not find the Left 4 Dead 2 folder. Pass --game-dir \"...\\steamapps\\common\\Left 4 Dead 2\".")
-    return GameInstall(root)
+    log = _log(args)
+    cands = find_installs(args.game_dir)
+    ok = [c for c in cands if c.ok]
+    if not ok:
+        if args.game_dir:
+            head = f"--game-dir {args.game_dir!r} is not a Left 4 Dead 2 installation."
+        else:
+            head = "Could not find a Left 4 Dead 2 installation."
+        sys.exit(
+            f"{head}\nChecked:\n{format_candidates(cands)}\n\n"
+            "Point the tool at the folder that contains left4dead2.exe, for example:\n"
+            f"  ibfix {GAME_DIR_EXAMPLE} scan\n"
+            "(Steam > right-click Left 4 Dead 2 > Manage > Browse local files shows that folder.)\n"
+            "Run `ibfix locate` to list every place that was searched."
+        )
+    chosen = ok[0]
+    log(f"game folder: {chosen.path}\n  (found via {chosen.source})")
+    # other copies Steam knows about (no drive scan here: keep every command fast)
+    others = [] if args.game_dir else [
+        c for c in find_installs(None, exhaustive=True, drive_roots=[]) if c.ok and c.path != chosen.path]
+    if others:
+        log(f"note: {len(others)} other installation(s) found - use --game-dir to pick one:")
+        for c in others:
+            log(f"  {c.path}")
+    return GameInstall(chosen.path)
 
 
 def _data_dir(args) -> Path:
@@ -70,6 +95,12 @@ def cmd_scan(args) -> int:
     an = Analyzer(game, data_dir, categories=cats, selective_threshold=args.threshold, log=_log(args))
     addons = game.list_addons()
     _log(args)(f"found {len(addons)} add-ons ({sum(1 for a in addons if a.is_enabled)} enabled) in {game.addons_dir}")
+    if not addons:
+        _log(args)(
+            f"WARNING: no .vpk add-ons in {game.addons_dir} or its workshop folder.\n"
+            "If you do have add-ons installed, this is the wrong copy of the game: run `ibfix locate`\n"
+            f"and pass the right folder with {GAME_DIR_EXAMPLE}."
+        )
 
     def progress(i, n, a):
         if not args.json:
@@ -211,7 +242,15 @@ def cmd_inspect(args) -> int:
     from .gamefiles import AddonInfo
     data_dir = _data_dir(args)
     root = find_game_dir(args.game_dir)
-    game = GameInstall(root) if root else GameInstall(Path(args.vpk).parent.parent.parent)
+    if root is None:
+        # the VPK may sit inside an install (addons/ or addons/workshop/): use that one
+        for up in Path(args.vpk).resolve().parents:
+            if (up / "left4dead2" / "pak01_dir.vpk").is_file():
+                root = up
+                break
+    game = GameInstall(root) if root else GameInstall(Path(args.vpk).resolve().parent)
+    if root is None:
+        _log(args)("note: no game installation found - per-model numbers only, no comparison with Valve's models")
     an = Analyzer(game, data_dir, categories=list(DECAL_CATEGORIES), selective_threshold=args.threshold, log=_log(args))
     p = Path(args.vpk)
     info = AddonInfo(path=p, entry=p.name, is_workshop=False, workshop_id=None, enabled=True, size=p.stat().st_size, mtime=p.stat().st_mtime)
@@ -223,6 +262,25 @@ def cmd_inspect(args) -> int:
     rep = ScanReport(time.strftime("%Y-%m-%d %H:%M:%S"), str(game.root), [risk], {}, an.baselines() if root else {}, {"selective_threshold": args.threshold})
     print(rep.to_json() if args.json else format_report(rep, verbose=True))
     return 0
+
+
+def cmd_locate(args) -> int:
+    cands = find_installs(args.game_dir, exhaustive=True)
+    if args.json:
+        print(json.dumps([{"path": str(c.path), "source": c.source, "ok": c.ok, "reason": c.reason} for c in cands], indent=2))
+        return 0 if any(c.ok for c in cands) else 1
+    ok = [c for c in cands if c.ok]
+    print("Places searched for Left 4 Dead 2 (OK = usable installation):")
+    print(format_candidates(cands, limit=200))
+    print()
+    if ok:
+        print(f"Will use: {ok[0].path}")
+        if len(ok) > 1:
+            print(f"Pick another with --game-dir, e.g.  ibfix --game-dir \"{ok[1].path}\" scan")
+        return 0
+    print("No installation found. Pass the folder that contains left4dead2.exe:")
+    print(f"  ibfix {GAME_DIR_EXAMPLE} scan")
+    return 1
 
 
 def _log(args):
@@ -280,6 +338,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("action", choices=["start", "good", "bad", "status", "finish"])
     b.set_defaults(func=cmd_bisect)
 
+    lo = sub.add_parser("locate", help="show where the tool looked for the game and which folder it will use")
+    lo.set_defaults(func=cmd_locate)
+
     i = sub.add_parser("inspect", help="analyse a single .vpk file")
     i.add_argument("vpk")
     i.add_argument("--threshold", type=int, default=4096)
@@ -288,8 +349,29 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def repair_windows_quotes(argv: List[str]) -> List[str]:
+    r"""
+    cmd.exe turns  --game-dir "D:\Games\Left 4 Dead 2\" scan  into ONE argument
+    'D:\Games\Left 4 Dead 2" scan' (the backslash escapes the closing quote).
+    A double quote can never be part of a Windows path, so split it back apart.
+    """
+    out: List[str] = []
+    for a in argv:
+        if '"' in a:
+            head, _, tail = a.partition('"')
+            out.append(head)
+            out.extend(t for t in tail.replace('"', " ").split() if t)
+        else:
+            out.append(a)
+    return out
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    if sys.platform == "win32":
+        argv = repair_windows_quotes(list(argv))
     args = ap.parse_args(argv)
     try:
         return args.func(args)

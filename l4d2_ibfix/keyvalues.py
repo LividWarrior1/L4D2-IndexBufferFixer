@@ -61,14 +61,41 @@ def tokenize(text: str) -> List[Tuple[str, str, int, int]]:
     return out
 
 
-def parse_keyvalues(text: str) -> Dict[str, object]:
+_ESCAPES = {"\\": "\\", '"': '"', "n": "\n", "t": "\t"}
+
+
+def _unescape(s: str) -> str:
+    """Steam .vdf/.acf escapes: \\\\ -> \\, \\" -> ", \\n, \\t (others kept verbatim)."""
+    if "\\" not in s:
+        return s
+    out = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s) and s[i + 1] in _ESCAPES:
+            out.append(_ESCAPES[s[i + 1]])
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def parse_keyvalues(text: str, unescape: bool = False) -> Dict[str, object]:
     """
     Parse into nested dicts.  Duplicate keys are kept as a list under the key.
     Keys are returned as written (callers usually lower() them).
+
+    ``unescape=True`` decodes backslash escapes in quoted strings, as Steam
+    writes them in libraryfolders.vdf / appmanifest_*.acf
+    ("D:\\\\SteamLibrary").  Leave it False for materials: VMT paths use
+    single backslashes literally.
     """
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):
         text = text[1:]
     toks = tokenize(text)
+    if unescape:
+        toks = [(k, _unescape(v) if k == "quoted" else v, s, e) for k, v, s, e in toks]
     i = 0
 
     def parse_block() -> Dict[str, object]:

@@ -32,20 +32,20 @@ class VPKRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "t.vpk"
             write_vpk_v1(p, files)
-            v = VPK(p)
-            self.assertEqual(v.version, 1)
-            self.assertEqual(set(v.entries), set(files))
-            for k, data in files.items():
-                self.assertEqual(v.read(k, verify_crc=True), data)
-            self.assertIsNotNone(v.find("MATERIALS/MODELS/X/A.VMT"))
-            # copy with replacement
-            q = Path(td) / "u.vpk"
-            copy_vpk_with_replacements(v, q, {"materials/models/x/a.vmt": b"patched"}, {"new/file.txt": b"n"})
-            w = VPK(q)
-            self.assertEqual(w.read("materials/models/x/a.vmt", verify_crc=True), b"patched")
-            self.assertEqual(w.read("new/file.txt", verify_crc=True), b"n")
-            self.assertEqual(w.read("materials/models/x/a.vtf", verify_crc=True), files["materials/models/x/a.vtf"])
-            self.assertEqual(len(w), len(files) + 1)
+            with VPK(p) as v:
+                self.assertEqual(v.version, 1)
+                self.assertEqual(set(v.entries), set(files))
+                for k, data in files.items():
+                    self.assertEqual(v.read(k, verify_crc=True), data)
+                self.assertIsNotNone(v.find("MATERIALS/MODELS/X/A.VMT"))
+                # copy with replacement
+                q = Path(td) / "u.vpk"
+                copy_vpk_with_replacements(v, q, {"materials/models/x/a.vmt": b"patched"}, {"new/file.txt": b"n"})
+            with VPK(q) as w:
+                self.assertEqual(w.read("materials/models/x/a.vmt", verify_crc=True), b"patched")
+                self.assertEqual(w.read("new/file.txt", verify_crc=True), b"n")
+                self.assertEqual(w.read("materials/models/x/a.vtf", verify_crc=True), files["materials/models/x/a.vtf"])
+                self.assertEqual(len(w), len(files) + 1)
 
 
 class VMTPatch(unittest.TestCase):
