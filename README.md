@@ -36,8 +36,9 @@ the fix that works inside the stock engine.
 
 1. Install Python 3.10 or newer from <https://www.python.org/downloads/windows/>
    (tick *Add python.exe to PATH*; the `py` launcher is installed by default).
-2. Download or clone this repository anywhere (it does not need to live in
-   the game folder; the game is found through the Steam registry).
+2. Download or clone this repository anywhere. It does not need to live in
+   the game folder, and the game can be on any drive (see
+   [Finding the game](#finding-the-game)).
 3. Open a terminal in the folder (Shift+right-click → *Open in Terminal*) or
    double-click `ibfix-gui.bat`.
 
@@ -47,6 +48,7 @@ puts an `ibfix` command on your PATH.
 ## Quick start
 
 ```
+ibfix locate               # check which Left 4 Dead 2 folder the tool will use
 ibfix scan                 # analyse enabled add-ons, print a risk report
 ibfix fix                  # DRY RUN: show exactly which files would be written
 ibfix fix --apply          # do it (replace mode)
@@ -68,10 +70,39 @@ ibfix revert --all         # undo everything
 | `probe` | Writes `cfg\ibfix_probe.cfg`; run `exec ibfix_probe` in-game to log the real flags/defaults of `r_drawmodeldecals`, `r_maxmodeldecal`, `cl_player_max_decal_count`, … |
 | `bisect start\|good\|bad\|status\|finish` | Halves the enabled add-on set via `addonlist.txt` to find an unknown culprit; `finish` restores the original list. |
 | `inspect FILE.vpk` | Analyse any VPK (e.g. your own export before publishing). |
+| `locate` | Lists every place searched for the game, why each was accepted or rejected, and which folder will be used. |
 
-Global options: `--game-dir` (auto-detected from the Steam registry and
-library folders), `--data-dir` (default `%LOCALAPPDATA%\L4D2IndexBufferFixer`;
-holds reports, backups, cache and `manifest.json`), `--json`.
+Global options: `--game-dir` (see below), `--data-dir` (default
+`%LOCALAPPDATA%\L4D2IndexBufferFixer`; holds reports, backups, cache and
+`manifest.json`), `--json`.
+
+## Finding the game
+
+Every command prints the folder it is using and how it found it. The search
+order is:
+
+1. `--game-dir`, or the `L4D2_DIR` environment variable.
+2. Steam libraries that contain `appmanifest_550.acf`, Steam's own record of
+   where Left 4 Dead 2 is installed, on whatever drive that is. Libraries are
+   read from Steam's `libraryfolders.vdf`.
+3. Other Steam libraries, then a scan of every fixed drive (A: to Z:) for
+   folders holding `steamapps`.
+
+A folder only counts as the game if `left4dead2\pak01_dir.vpk` exists. When
+you move the game to another drive or uninstall it, Steam leaves your add-ons
+and configs behind in the old place, and that leftover folder is skipped.
+
+If detection picks the wrong copy, or finds nothing:
+
+```
+ibfix locate
+ibfix --game-dir "D:\SteamLibrary\steamapps\common\Left 4 Dead 2" scan
+```
+
+Steam shows the right folder under *right-click Left 4 Dead 2 → Manage →
+Browse local files*. `--game-dir` also accepts a path pasted with quotes
+(Explorer's *Copy as path*), a trailing backslash, the `left4dead2` or
+`addons` subfolder, `left4dead2.exe` itself, or the Steam library folder.
 
 ## Modes
 
@@ -149,6 +180,10 @@ Tested on one real installation (327 add-ons parsed, three high-density survivor
 models fixed, a full campaign played crash-free afterwards). Reports from other
 installs - especially models the risk model gets wrong in either direction -
 are welcome as issues; attach the `scan -v --json` output.
+
+That installation was on C:, which is how issue #1 (games on other drives were
+not found) got through 0.1.0. Detection now has its own test suite that runs
+on real Windows in CI.
 
 ## License
 

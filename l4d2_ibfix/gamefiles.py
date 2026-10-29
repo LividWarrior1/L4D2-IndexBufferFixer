@@ -23,6 +23,107 @@ BASE_GAME_DIRS = ("left4dead2_dlc3", "left4dead2_dlc2", "left4dead2_dlc1", "left
 
 
 # --------------------------------------------------------------- find the game
+#
+# Order of trust:
+#   1. --game-dir / L4D2_DIR (normalised: quotes, trailing slashes, and paths
+#      that point a level too high or too low are all accepted)
+#   2. Steam libraries that contain appmanifest_550.acf - Steam's own record of
+#      where L4D2 is installed.  These are checked before any other library.
+#   3. Other Steam libraries, then a scan of every fixed drive.
+#
+# A folder only counts as an install if left4dead2/pak01_dir.vpk exists.  When
+# a game is moved to another drive or uninstalled, Steam leaves user files
+# (addons, cfg, saves) behind, so "has a left4dead2 folder" is not enough:
+# that leftover shell is exactly what made 0.1.0 pick C: and find nothing.
+
+_DRIVE_FIXED = 3
+_SKIP_TOP_DIRS = {
+    "windows", "$recycle.bin", "system volume information", "programdata", "recovery",
+    "perflogs", "$windows.~bt", "$windows.~ws", "msocache", "config.msi", "$sysreset",
+    "windows.old", "intel", "amd", "nvidia",
+}
+_COMMON_LIBRARY_DIRS = (
+    "Program Files (x86)/Steam", "Program Files/Steam", "SteamLibrary", "Steam",
+    "Steam Library", "Games/Steam", "Games/SteamLibrary", "Games/Steam Library",
+)
+
+
+@dataclass
+class InstallCandidate:
+    path: Path
+    source: str        # where the candidate came from, shown to the user
+    ok: bool = False
+    reason: str = ""   # why it was rejected (or "ok")
+
+
+def check_install(root: Path) -> Tuple[bool, str]:
+    """Is ``root`` (the folder holding left4dead2/) a real L4D2 installation?"""
+    try:
+        if not root.is_dir():
+            return False, "folder does not exist"
+        gd = root / "left4dead2"
+        if not gd.is_dir():
+            return False, "no left4dead2 subfolder"
+        if not (gd / "pak01_dir.vpk").is_file():
+            return False, ("left4dead2 has no pak01_dir.vpk - leftover files from a moved or "
+                           "uninstalled copy, not the game")
+    except OSError as e:
+        return False, f"cannot read folder ({e})"
+    return True, "ok"
+
+
+def normalize_user_path(raw: str) -> Path:
+    r"""
+    Clean a path typed or pasted by a user:
+    * surrounding quotes from Explorer's "Copy as path",
+    * a stray trailing quote from cmd.exe ("C:\...\Left 4 Dead 2\" passes the
+      quote through as a literal character),
+    * trailing slashes, %VARIABLES% and ~.
+    """
+    s = (raw or "").strip()
+    if '"' in s:
+        s = s.replace('"', "")
+    s = s.strip().strip("'").strip()
+    if len(s) > 3:
+        s = s.rstrip("\\/")
+    if len(s) == 2 and s[1] == ":":
+        s += "\\"
+    return Path(os.path.expanduser(os.path.expandvars(s)))
+
+
+def roots_for_user_path(p: Path) -> List[Path]:
+    """
+    Every game root a user-supplied path could reasonably mean, most likely
+    first: the game folder itself, a folder inside it (left4dead2, addons,
+    addons/workshop, bin), a file inside it (left4dead2.exe, pak01_dir.vpk,
+    addonlist.txt), or a folder above it (steamapps/common, steamapps, the
+    Steam library root).
+    """
+    out: List[Path] = []
+    try:
+        if p.is_file():
+            name = p.name.lower()
+            p = p.parent
+            if name in ("pak01_dir.vpk", "addonlist.txt", "gameinfo.txt", "console.log"):
+                p = p.parent
+    except OSError:
+        pass
+    out.append(p)
+    low = p.name.lower()
+    if low in ("left4dead2", "bin", "left4dead2_dlc1", "left4dead2_dlc2", "left4dead2_dlc3"):
+        out.append(p.parent)
+    if low == "addons":
+        out.append(p.parent.parent)
+    if low == "workshop" and p.parent.name.lower() == "addons":
+        out.append(p.parent.parent.parent)
+    if low == "cfg":
+        out.append(p.parent.parent)
+    out.append(p / GAME_FOLDER_NAME)                            # ...\steamapps\common
+    out.append(p / "common" / GAME_FOLDER_NAME)                 # ...\steamapps
+    out.append(p / "steamapps" / "common" / GAME_FOLDER_NAME)   # Steam library root
+    return out
+
+
 def _steam_root_from_registry() -> Optional[Path]:
     if sys.platform != "win32":
         return None
@@ -40,7 +141,7 @@ def _steam_root_from_registry() -> Optional[Path]:
                         try:
                             val, _ = winreg.QueryValueEx(k, name)
                             p = Path(str(val))
-                            if p.exists():
+                            if p.is_dir():
                                 return p
                         except OSError:
                             continue
@@ -51,68 +152,193 @@ def _steam_root_from_registry() -> Optional[Path]:
     return None
 
 
-def _library_folders(steam_root: Path) -> List[Path]:
-    libs = [steam_root]
-    vdf = steam_root / "steamapps" / "libraryfolders.vdf"
-    if vdf.exists():
+def steam_roots() -> List[Path]:
+    """Steam client folders on this machine (registry on Windows, usual paths elsewhere)."""
+    roots: List[Path] = []
+    r = _steam_root_from_registry()
+    if r:
+        roots.append(r)
+    if sys.platform != "win32":
+        home = Path.home()
+        for p in (home / ".steam" / "steam", home / ".steam" / "root", home / ".local" / "share" / "Steam",
+                  home / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam"):
+            if p.is_dir():
+                roots.append(p)
+    return roots
+
+
+def _read_vdf(path: Path) -> Dict[str, object]:
+    return parse_keyvalues(decode_text(path.read_bytes()), unescape=True)
+
+
+def library_folders(steam_root: Path) -> List[Path]:
+    """All Steam library folders listed by a Steam client (both vdf locations, old and new format)."""
+    libs: List[Path] = [steam_root]
+    for vdf in (steam_root / "steamapps" / "libraryfolders.vdf", steam_root / "config" / "libraryfolders.vdf"):
         try:
-            kv = parse_keyvalues(decode_text(vdf.read_bytes()))
-            lf = kv_get(kv, "libraryfolders") or {}
-            if isinstance(lf, dict):
-                for _k, v in lf.items():
-                    path = None
-                    if isinstance(v, dict):
-                        path = kv_get(v, "path")
-                    elif isinstance(v, str):
-                        path = v
-                    if path:
-                        p = Path(path)
-                        if p.exists() and p not in libs:
-                            libs.append(p)
+            if not vdf.is_file():
+                continue
+            kv = _read_vdf(vdf)
         except Exception:
-            pass
+            continue
+        lf = kv_get(kv, "libraryfolders")
+        if not isinstance(lf, dict):
+            continue
+        for k, v in lf.items():
+            path = None
+            if isinstance(v, dict):
+                path = kv_get(v, "path")
+            elif isinstance(v, str) and k.strip().isdigit():
+                path = v                       # pre-2021 format: "1"  "D:\\SteamLibrary"
+            if path:
+                p = Path(str(path))
+                if all(os.path.normcase(str(p)) != os.path.normcase(str(x)) for x in libs):
+                    libs.append(p)
     return libs
 
 
-def find_game_dir(explicit: Optional[str] = None) -> Optional[Path]:
-    """Return the folder containing left4dead2.exe / left4dead2/ (or None)."""
-    if explicit:
-        p = Path(explicit).expanduser()
-        if (p / "left4dead2").is_dir():
-            return p
-        if p.name.lower() == "left4dead2" and (p / "pak01_dir.vpk").exists():
-            return p.parent
-        return None
-    candidates: List[Path] = []
-    root = _steam_root_from_registry()
-    if root:
-        for lib in _library_folders(root):
-            manifest = lib / "steamapps" / f"appmanifest_{APP_ID}.acf"
-            installdir = GAME_FOLDER_NAME
-            if manifest.exists():
+def _manifest_installdir(lib: Path) -> Optional[str]:
+    """installdir from appmanifest_550.acf if this library has one, else None."""
+    manifest = lib / "steamapps" / f"appmanifest_{APP_ID}.acf"
+    try:
+        if not manifest.is_file():
+            return None
+        state = kv_get(_read_vdf(manifest), "AppState") or {}
+        if isinstance(state, dict):
+            return str(kv_get(state, "installdir", GAME_FOLDER_NAME) or GAME_FOLDER_NAME)
+    except Exception:
+        pass
+    return GAME_FOLDER_NAME
+
+
+def fixed_drives() -> List[Path]:
+    """Local fixed drives (never floppy/card-reader/optical, which can pop 'insert disk' dialogs)."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+        import string
+
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        mask = k32.GetLogicalDrives()
+        out = []
+        for i, letter in enumerate(string.ascii_uppercase):
+            if mask & (1 << i):
+                root = f"{letter}:\\"
+                if k32.GetDriveTypeW(ctypes.c_wchar_p(root)) == _DRIVE_FIXED:
+                    out.append(Path(root))
+        return out
+    except Exception:
+        return [Path(f"{l}:\\") for l in "CDEFGHIJ" if os.path.isdir(f"{l}:\\")]
+
+
+def _drive_scan(drive_roots: Iterable[Path]) -> Iterable[Tuple[Path, str]]:
+    for d in drive_roots:
+        for rel in _COMMON_LIBRARY_DIRS:
+            lib = d / rel
+            yield lib / "steamapps" / "common" / GAME_FOLDER_NAME, f"drive scan: {lib}"
+        # any folder up to two levels deep that holds a steamapps folder
+        try:
+            tops = [t for t in d.iterdir() if t.is_dir() and t.name.lower() not in _SKIP_TOP_DIRS]
+        except OSError:
+            continue
+        for t in tops:
+            subs = [t]
+            try:
+                subs += [c for c in t.iterdir() if c.is_dir()]
+            except OSError:
+                pass
+            for lib in subs:
                 try:
-                    kv = parse_keyvalues(decode_text(manifest.read_bytes()))
-                    state = kv_get(kv, "AppState") or {}
-                    if isinstance(state, dict):
-                        installdir = kv_get(state, "installdir", GAME_FOLDER_NAME) or GAME_FOLDER_NAME
-                except Exception:
-                    pass
-            candidates.append(lib / "steamapps" / "common" / installdir)
-    env_root = os.environ.get("L4D2_DIR")
-    if env_root:
-        candidates.insert(0, Path(env_root))
-    for drive in ("C:", "D:", "E:", "F:"):
-        candidates.append(Path(f"{drive}/Program Files (x86)/Steam/steamapps/common/{GAME_FOLDER_NAME}"))
-        candidates.append(Path(f"{drive}/SteamLibrary/steamapps/common/{GAME_FOLDER_NAME}"))
-        candidates.append(Path(f"{drive}/Steam/steamapps/common/{GAME_FOLDER_NAME}"))
-    home = Path.home()
-    candidates.append(home / ".steam" / "steam" / "steamapps" / "common" / GAME_FOLDER_NAME)
-    candidates.append(home / ".local" / "share" / "Steam" / "steamapps" / "common" / GAME_FOLDER_NAME)
-    candidates.append(home / "mnt" / GAME_FOLDER_NAME)
-    for c in candidates:
-        if (c / "left4dead2").is_dir():
-            return c
+                    if (lib / "steamapps").is_dir():
+                        yield lib / "steamapps" / "common" / GAME_FOLDER_NAME, f"drive scan: {lib}"
+                except OSError:
+                    continue
+
+
+def find_installs(explicit: Optional[str] = None, *, exhaustive: bool = False,
+                  steam_root_list: Optional[List[Path]] = None,
+                  drive_roots: Optional[List[Path]] = None) -> List[InstallCandidate]:
+    """
+    Every place checked, in order, with a verdict.  The first ``ok`` entry is
+    the installation to use.  With ``explicit`` only that path (and the levels
+    around it) is considered: a typo must produce an error, not a silent
+    fallback to some other copy.  ``steam_root_list`` / ``drive_roots`` exist
+    so tests can point the search at a fake filesystem.
+    """
+    out: List[InstallCandidate] = []
+    seen: set = set()
+
+    def add(path: Path, source: str, only_if_exists: bool = False) -> None:
+        key = os.path.normcase(os.path.abspath(str(path)))
+        if key in seen:
+            return
+        try:
+            if only_if_exists and not path.is_dir():
+                return
+        except OSError:
+            return
+        seen.add(key)
+        ok, reason = check_install(path)
+        out.append(InstallCandidate(path, source, ok, reason))
+
+    def done() -> bool:
+        return not exhaustive and any(c.ok for c in out)
+
+    if explicit:
+        for c in roots_for_user_path(normalize_user_path(explicit)):
+            add(c, "--game-dir", only_if_exists=bool(out))
+        return out
+
+    env = os.environ.get("L4D2_DIR")
+    if env:
+        for c in roots_for_user_path(normalize_user_path(env)):
+            add(c, "L4D2_DIR", only_if_exists=bool(out))
+        if done():
+            return out
+
+    libs: List[Path] = []
+    for root in (steam_root_list if steam_root_list is not None else steam_roots()):
+        for lib in library_folders(root):
+            if all(os.path.normcase(str(lib)) != os.path.normcase(str(x)) for x in libs):
+                libs.append(lib)
+    # Libraries Steam says L4D2 is installed in come first, whatever drive they are on.
+    for lib in libs:
+        installdir = _manifest_installdir(lib)
+        if installdir:
+            add(lib / "steamapps" / "common" / installdir, f"Steam library {lib} (has appmanifest_550.acf)")
+    if done():
+        return out
+    for lib in libs:
+        add(lib / "steamapps" / "common" / GAME_FOLDER_NAME, f"Steam library {lib}", only_if_exists=True)
+    if done():
+        return out
+
+    for path, source in _drive_scan(drive_roots if drive_roots is not None else fixed_drives()):
+        add(path, source, only_if_exists=True)
+        if done():
+            return out
+    if sys.platform != "win32":
+        add(Path.home() / "mnt" / GAME_FOLDER_NAME, "linked-folder mount", only_if_exists=True)
+    return out
+
+
+def find_game_dir(explicit: Optional[str] = None) -> Optional[Path]:
+    """The folder containing left4dead2/ (with its pak01_dir.vpk), or None."""
+    for c in find_installs(explicit):
+        if c.ok:
+            return c.path
     return None
+
+
+def format_candidates(cands: List[InstallCandidate], limit: int = 15) -> str:
+    lines = []
+    for c in cands[:limit]:
+        mark = "OK " if c.ok else "-- "
+        lines.append(f"  {mark}{c.path}\n       from {c.source}" + ("" if c.ok else f": {c.reason}"))
+    if len(cands) > limit:
+        lines.append(f"  ... and {len(cands) - limit} more")
+    return "\n".join(lines) if lines else "  (no Steam installation or library folders were found)"
 
 
 # ------------------------------------------------------------------- add-ons

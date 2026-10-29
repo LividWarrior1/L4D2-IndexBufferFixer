@@ -13,7 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import cli
-from .gamefiles import default_data_dir, find_game_dir
+from .gamefiles import default_data_dir, find_installs, format_candidates
 
 
 class _Writer(io.TextIOBase):
@@ -40,7 +40,9 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text="Game folder:").grid(row=0, column=0, sticky="w")
-        found = find_game_dir(None)
+        cands = find_installs(None)
+        ok = [c for c in cands if c.ok]
+        found = ok[0].path if ok else None
         self.game_var = tk.StringVar(value=str(found) if found else "")
         ttk.Entry(top, textvariable=self.game_var, width=80).grid(row=0, column=1, sticky="we", padx=4)
         ttk.Button(top, text="Browse...", command=self._browse).grid(row=0, column=2)
@@ -81,13 +83,28 @@ class App(tk.Tk):
         self.out.configure(yscrollcommand=ysb.set)
         ysb.pack(side="right", fill="y")
         self.after(100, self._drain)
-        self._log("Ready. Start with 'Scan add-ons'.\n")
+        if found:
+            self._log(f"Game folder: {found}\n  (found via {ok[0].source})\n"
+                      "If that is not the copy you play, use Browse... to pick the folder that contains left4dead2.exe.\n\n")
+            self._log("Ready. Start with 'Scan add-ons'.\n")
+        else:
+            self._log("Could not find Left 4 Dead 2 automatically. Places checked:\n"
+                      f"{format_candidates(cands)}\n\n"
+                      "Use Browse... to pick the folder that contains left4dead2.exe\n"
+                      "(Steam > right-click Left 4 Dead 2 > Manage > Browse local files).\n")
 
     # ------------------------------------------------------------ helpers
     def _browse(self) -> None:
-        d = filedialog.askdirectory(title="Select the 'Left 4 Dead 2' folder")
+        d = filedialog.askdirectory(title="Select the 'Left 4 Dead 2' folder (the one with left4dead2.exe)")
         if d:
-            self.game_var.set(d)
+            cands = find_installs(d)
+            ok = [c for c in cands if c.ok]
+            if ok:
+                self.game_var.set(str(ok[0].path))
+                self._log(f"Game folder set to {ok[0].path}\n")
+            else:
+                self.game_var.set(d)
+                self._log(f"{d} does not look like a Left 4 Dead 2 installation:\n{format_candidates(cands)}\n")
 
     def _log(self, s: str) -> None:
         self.out.insert("end", s)
