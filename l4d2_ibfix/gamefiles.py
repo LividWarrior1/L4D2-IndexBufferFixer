@@ -331,8 +331,6 @@ def find_installs(explicit: Optional[str] = None, *, exhaustive: bool = False,
         add(path, source, only_if_exists=True)
         if done():
             return out
-    if sys.platform != "win32":
-        add(Path.home() / "mnt" / GAME_FOLDER_NAME, "linked-folder mount", only_if_exists=True)
     return out
 
 
