@@ -132,6 +132,23 @@ class NoSteamInfo(Base):
         c = gf.find_installs(steam_root_list=[], drive_roots=[self.C, self.D])
         self.assertEqual(chosen(c), real)
 
+    def test_unreadable_folder_does_not_hide_the_rest_of_the_drive(self):
+        real = make_install(self.D / "zzz Games" / "steamapps" / "common" / GAME)
+        locked = self.D / "aaa Locked"
+        locked.mkdir()
+        orig = Path.is_dir
+
+        def is_dir(p):                      # emulate Windows: PermissionError for a protected folder
+            if p == locked:
+                raise PermissionError(13, "Access is denied", str(p))
+            return orig(p)
+        Path.is_dir = is_dir
+        try:
+            c = gf.find_installs(steam_root_list=[], drive_roots=[self.D])
+        finally:
+            Path.is_dir = orig
+        self.assertEqual(chosen(c), real)
+
     def test_nothing_but_a_leftover_gives_no_install(self):
         make_leftover(self.C / "SteamLibrary" / "steamapps" / "common" / GAME)
         c = gf.find_installs(steam_root_list=[], drive_roots=[self.C])

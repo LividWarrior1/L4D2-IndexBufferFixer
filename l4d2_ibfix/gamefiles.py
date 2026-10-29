@@ -232,28 +232,41 @@ def fixed_drives() -> List[Path]:
         return [Path(f"{l}:\\") for l in "CDEFGHIJ" if os.path.isdir(f"{l}:\\")]
 
 
+def _is_dir(p: Path) -> bool:
+    """Path.is_dir() that never raises: on Windows it throws PermissionError for
+    protected folders (System Volume Information, other users' profiles...)."""
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
+def _subdirs(p: Path, skip: frozenset = frozenset()) -> List[Path]:
+    """Child folders of p; unreadable entries are skipped one by one, never the whole listing."""
+    out: List[Path] = []
+    try:
+        entries = list(p.iterdir())
+    except OSError:
+        return out
+    for e in entries:
+        if e.name.lower() in skip:
+            continue
+        if _is_dir(e):
+            out.append(e)
+    return out
+
+
 def _drive_scan(drive_roots: Iterable[Path]) -> Iterable[Tuple[Path, str]]:
+    skip = frozenset(_SKIP_TOP_DIRS)
     for d in drive_roots:
         for rel in _COMMON_LIBRARY_DIRS:
             lib = d / rel
             yield lib / "steamapps" / "common" / GAME_FOLDER_NAME, f"drive scan: {lib}"
         # any folder up to two levels deep that holds a steamapps folder
-        try:
-            tops = [t for t in d.iterdir() if t.is_dir() and t.name.lower() not in _SKIP_TOP_DIRS]
-        except OSError:
-            continue
-        for t in tops:
-            subs = [t]
-            try:
-                subs += [c for c in t.iterdir() if c.is_dir()]
-            except OSError:
-                pass
-            for lib in subs:
-                try:
-                    if (lib / "steamapps").is_dir():
-                        yield lib / "steamapps" / "common" / GAME_FOLDER_NAME, f"drive scan: {lib}"
-                except OSError:
-                    continue
+        for t in _subdirs(d, skip):
+            for lib in [t] + _subdirs(t):
+                if _is_dir(lib / "steamapps"):
+                    yield lib / "steamapps" / "common" / GAME_FOLDER_NAME, f"drive scan: {lib}"
 
 
 def find_installs(explicit: Optional[str] = None, *, exhaustive: bool = False,
