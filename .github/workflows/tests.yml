@@ -20,6 +20,10 @@ jobs:
       - name: Unit tests
         run: python tests/run_ci.py
       - name: CLI smoke test
+        shell: bash
         run: |
-          python ibfix.py --help
-          python ibfix.py locate || echo "no L4D2 on the runner - expected"
+          python ibfix.py --help > /dev/null
+          # no L4D2 on the runner, so locate exits 1 - but it must run and report, not crash
+          out=$(python ibfix.py locate 2>&1) || true
+          echo "$out"
+          echo "$out" | grep -q "Places searched" || { echo "::error::ibfix locate crashed"; exit 1; }
